@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+requests
+PyGithub
+openai
+python-dotenv
+pydantic
+PyYAML
+pytest
+schemathesis
+
+
