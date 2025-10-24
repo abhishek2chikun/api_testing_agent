@@ -40,6 +40,30 @@ This guide will help you set up Jenkins to automatically run generated tests whe
    - **Description**: GitHub Access Token
 4. Click **OK**
 
+### Step 2.5: Configure Build Tools (Maven for Java tests)
+
+If you plan to run Java/RestAssured tests, configure Maven:
+
+1. Go to **Manage Jenkins** → **Global Tool Configuration**
+2. Scroll to **Maven** section
+3. Click **Add Maven**
+4. Configure:
+   - **Name**: `Maven-3.9.6` (must match the name in Jenkinsfile)
+   - **Install automatically**: ✅ Check this
+   - **Install from Apache**: Select version `3.9.6` or latest
+5. Optional: Also configure JDK if needed:
+   - Scroll to **JDK** section
+   - Click **Add JDK**
+   - **Name**: `JDK-17`
+   - **Install automatically**: ✅ Check this
+   - Select OpenJDK 17 or your preferred version
+6. Click **Save**
+
+**What this does:**
+- Jenkins will automatically download and install Maven on first use
+- The `Jenkinsfile` references this tool via the `tools` directive
+- Maven becomes available in PATH for all pipeline stages
+
 ### Step 3: Configure Jira Credentials (Optional)
 
 If you want to post test results back to Jira:

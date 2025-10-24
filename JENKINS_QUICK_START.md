@@ -51,6 +51,19 @@ Access Jenkins at: **http://localhost:8080**
    - HTML Publisher Plugin
 4. Click **Install without restart**
 
+### Step 3.5: Configure Maven Tool (for Java tests) (1 min)
+
+1. Go to **Manage Jenkins** → **Global Tool Configuration**
+2. Scroll to **Maven** section
+3. Click **Add Maven**
+4. Configure:
+   - Name: `Maven-3.9.6`
+   - Check ✅ **Install automatically**
+   - Select version: `3.9.6` (or latest available)
+5. Click **Save**
+
+**Note:** Jenkins will automatically download Maven on the first Java build. This takes ~1 minute on first run.
+
 ### Step 4: Add GitHub Credentials (1 min)
 
 1. Go to **Manage Jenkins** → **Manage Credentials**

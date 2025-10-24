@@ -4,6 +4,10 @@
 pipeline {
     agent any
     
+    tools {
+        maven 'Maven-3.9.11'  // References Maven tool configured in Jenkins
+    }
+    
     environment {
         // Extract Epic key from branch name (e.g., auto/tests/KAN-4/timestamp -> KAN-4)
         EPIC_KEY = sh(
@@ -121,8 +125,13 @@ pipeline {
             steps {
                 echo "📦 Setting up Java environment..."
                 sh '''
+                    echo "Java version:"
                     java -version
+                    echo ""
+                    echo "Maven version:"
                     mvn -version
+                    echo ""
+                    echo "Maven home: $MAVEN_HOME"
                     echo "✓ Java environment ready"
                 '''
             }
