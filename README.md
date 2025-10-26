@@ -88,6 +88,110 @@ An intelligent orchestration service that automatically:
 
 ---
 
+## 🔄 Detailed AI Processing Flow
+
+```mermaid
+sequenceDiagram
+    participant J as Jira Epic
+    participant O as Orchestrator
+    participant AI1 as AI-1: Gate
+    participant AI2 as AI-2: Generator
+    participant AI3 as AI-3: Reviewer
+    participant AI4 as AI-4: Refiner
+    participant GH as GitHub
+    participant JK as Jenkins
+
+    J->>O: Epic created/updated
+    O->>O: Fetch & parse contract
+    
+    Note over O,AI1: Eligibility Check
+    O->>AI1: epic + contract
+    AI1-->>O: {should_proceed: bool, reason}
+    
+    alt should_proceed = false
+        O->>J: Post gate failure reason
+        Note over O: STOP
+    else should_proceed = true
+        Note over O,AI2: Test Generation
+        O->>AI2: epic + contract + language
+        AI2-->>O: files {path: content}
+        
+        Note over O,AI3: Review & Scoring
+        O->>AI3: epic + contract + files
+        AI3-->>O: {score, syntax_ok, coverage_score, criteria_score, notes}
+        O->>O: Calculate avg = (coverage + criteria + syntax)/3
+        
+        alt avg <= threshold
+            Note over O,AI4: Refinement Pass
+            O->>AI4: epic + contract + files + notes
+            AI4-->>O: corrected files
+            O->>O: Apply corrections
+        end
+        
+        O->>O: Write metadata.json<br/>(gate, testcases, reviewer, refiner)
+        O->>O: Save locally: output/EPIC/
+        
+        opt GitHub enabled
+            O->>GH: Push to auto/tests/EPIC/timestamp
+            GH->>JK: Trigger pipeline
+            JK->>JK: Run tests (pytest/mvn)
+            JK->>J: Post results + branch
+        end
+    end
+```
+
+## 📦 Data Flow & Artifacts
+
+```mermaid
+graph LR
+    subgraph Inputs
+        E[Epic Description<br/>OpenAPI URL]
+        C[config.yaml]
+    end
+
+    subgraph AI_Chain["AI Processing Chain"]
+        direction TB
+        G[Gate Output<br/>JSON]
+        T[Test Files<br/>Dict]
+        R[Review Scores<br/>JSON]
+        F[Refined Files<br/>Dict]
+    end
+
+    subgraph Artifacts["📦 Output Artifacts"]
+        direction TB
+        M[metadata.json<br/>├─ gate<br/>├─ test_cases<br/>├─ reviewer<br/>├─ refiner_output<br/>└─ refinement_metadata]
+        GI[GENERATION_INFO.txt<br/>summary]
+        TF[Test Files<br/>*.py / *.java]
+    end
+
+    E --> G
+    G --> T
+    T --> R
+    R --> F
+    
+    G --> M
+    T --> M
+    R --> M
+    F --> M
+    
+    T --> TF
+    F --> TF
+    
+    C -.->|threshold| R
+    
+    M --> GH[GitHub Branch]
+    TF --> GH
+    GI --> GH
+
+    style M fill:#ffd700
+    style G fill:#e1f5ff
+    style T fill:#fff9e1
+    style R fill:#ffe1f5
+    style F fill:#e1ffe1
+```
+
+---
+
 ## 📁 Project Structure
 
 ```
