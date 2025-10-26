@@ -4,6 +4,9 @@ Coordinates between Jira, LLM, GitHub, and test execution services.
 """
 import logging
 import os
+import json
+import hashlib
+import copy
 from datetime import datetime
 from pathlib import Path
 from integrations.jira.client import fetch_issue, post_comment
@@ -11,6 +14,10 @@ from integrations.jira.contract_parser import extract_contract
 from services.test_generator.generator import generate_tests
 from integrations.github.client import commit_files_to_branch
 from services.test_runner.runner import run_pytests_in_docker, run_maven_tests_in_docker
+from services.test_generator.gating import check_epic_eligibility
+from config.loader import get_config_value
+from services.test_generator.reviewer import review_and_fix_tests
+from services.test_generator.refiner import refine_tests_with_notes
 
 logging.basicConfig(level=logging.INFO)
 
@@ -46,6 +53,12 @@ def process_epic(
     logging.info('[%s] ============================================================', issue_key)
     
     results = {'output_dir': None, 'github_branch': None}
+    gate_result = None
+    ai2_generated_files_snapshot = None
+    review_json = None
+    refined = {}
+    threshold = float(get_config_value('openai.review_threshold', 0.7))
+    avg = None
     
     try:
         # Step 1: Fetch Epic from Jira
@@ -74,18 +87,145 @@ def process_epic(
         else:
             logging.info('[%s] ✓ Using Epic description for test generation', issue_key)
         
+        # Eligibility Gate (LLM) before generation
+        try:
+            gating_model = get_config_value('openai.gating_model', 'gpt-4o-mini')
+            logging.info('[%s] Eligibility gate using model: %s', issue_key, gating_model)
+            gate = check_epic_eligibility(issue_key, epic, contract, model=gating_model)
+            gate_result = gate
+            logging.info('[%s]   └─ Gate result: %s', issue_key, gate)
+            logging.debug('[%s]   └─ Gate should_proceed=%s reason=%s', issue_key, gate.get('should_proceed'), gate.get('reason'))
+
+            # Normalize key for user-requested spelling as well
+            gate_json_for_comment = {
+                'should_prcodeed': bool(gate.get('should_proceed')),  # preserves requested misspelling
+                'reason': gate.get('reason', '')
+            }
+
+            if not gate.get('should_proceed'):
+                msg = (
+                    '🛑 Eligibility gate failed. Not proceeding with test generation.\n\n'
+                    f"```\n{gate_json_for_comment}\n```"
+                )
+                try:
+                    post_comment(issue_key, msg)
+                except Exception as e:
+                    logging.warning('[%s] Could not post gate result to Jira: %s', issue_key, str(e))
+                logging.info('[%s] Skipping generation due to gate decision.', issue_key)
+                return {'output_dir': None, 'github_branch': None, 'skipped': True}
+        except Exception as e:
+            logging.warning('[%s] Eligibility gate error (continuing): %s', issue_key, str(e))
+
         # Step 3: Generate Tests using LLM (Python/pytest or Java/RestAssured)
         framework = 'pytest' if language.lower() == 'python' else 'RestAssured'
         logging.info('[%s] Step 3/5: Generating %s tests with LLM', issue_key, framework)
         logging.info('[%s]   └─ Preparing prompt with OpenAPI spec + Epic details...', issue_key)
         
         generated_files = generate_tests(issue_key, epic, contract, language=language)
+        ai2_generated_files_snapshot = copy.deepcopy(generated_files)
         
         logging.info('[%s] ✓ Generated %d test files:', issue_key, len(generated_files))
         for file_path in generated_files.keys():
             logging.info('[%s]   └─ %s', issue_key, file_path)
+
+        # Review & Fix Layer (LLM)
+        try:
+            review_json, corrected = review_and_fix_tests(issue_key, epic, contract, generated_files)
+            score = float(review_json.get('score', 0.0))
+            logging.info('[%s] Review score: %.2f (syntax_ok=%s, coverage=%.2f, criteria=%.2f)',
+                         issue_key,
+                         score,
+                         review_json.get('syntax_ok'),
+                         float(review_json.get('coverage_score', 0.0)),
+                         float(review_json.get('criteria_score', 0.0)))
+            if review_json.get('notes'):
+                notes_preview = str(review_json.get('notes'))
+                logging.debug('[%s] Review notes (first 500 chars): %s', issue_key, notes_preview[:500])
+            if corrected:
+                logging.info('[%s] Applying reviewer corrections to %d files', issue_key, len(corrected))
+                generated_files.update(corrected)
+
+            # Threshold-based refinement pass
+            avg = (float(review_json.get('coverage_score', 0.0)) + float(review_json.get('criteria_score', 0.0)) + (1.0 if review_json.get('syntax_ok') else 0.0)) / 3.0
+            logging.info('[%s] Review average=%.3f threshold=%.3f (<= triggers refine: %s)', issue_key, avg, threshold, avg <= threshold)
+            if avg <= threshold:
+                logging.info('[%s] Refinement triggered due to average <= threshold', issue_key)
+                try:
+                    files_before_refine = copy.deepcopy(generated_files)
+                    refined = refine_tests_with_notes(issue_key, epic, contract, generated_files, review_json.get('notes', ''))
+                    applied = False
+                    if refined:
+                        logging.info('[%s] Applied refinement changes to %d files', issue_key, len(refined))
+                        generated_files.update(refined)
+                        applied = True
+                    # Build refinement metadata summary (always when triggered)
+                    refine_changes = []
+                    # Compute diffs between before and after
+                    for path, after in generated_files.items():
+                        before = files_before_refine.get(path)
+                        if before is None and path in (refined or {}):
+                            refine_changes.append({
+                                'path': path,
+                                'change': 'added',
+                            })
+                        elif before is not None and after != before:
+                            refine_changes.append({
+                                'path': path,
+                                'change': 'modified',
+                                'before_sha256': hashlib.sha256(before.encode('utf-8')).hexdigest(),
+                                'after_sha256': hashlib.sha256(after.encode('utf-8')).hexdigest(),
+                                'before_lines': len(before.splitlines()),
+                                'after_lines': len(after.splitlines())
+                            })
+                    refined_meta = {
+                        'triggered': True,
+                        'applied': applied,
+                        'threshold': threshold,
+                        'average_score': round(avg, 4),
+                        'coverage_score': review_json.get('coverage_score'),
+                        'criteria_score': review_json.get('criteria_score'),
+                        'syntax_ok': review_json.get('syntax_ok'),
+                        'changes': refine_changes
+                    }
+                except Exception as ref_e:
+                    logging.warning('[%s] Refinement layer error (continuing): %s', issue_key, str(ref_e))
+            else:
+                logging.info('[%s] Refinement skipped (avg=%.3f > threshold=%.3f)', issue_key, avg, threshold)
+        except Exception as e:
+            logging.warning('[%s] Review layer error (continuing): %s', issue_key, str(e))
+
+        # Consolidated AI metadata (gate, testcases, reviewer, refiner)
+        try:
+            # If refined_meta not created (no trigger), create default structure
+            if 'refined_meta' not in locals():
+                refined_meta = {
+                    'triggered': False,
+                    'applied': False,
+                    'threshold': threshold,
+                    'average_score': round(avg, 4) if avg is not None else None,
+                    'coverage_score': review_json.get('coverage_score') if review_json else None,
+                    'criteria_score': review_json.get('criteria_score') if review_json else None,
+                    'syntax_ok': review_json.get('syntax_ok') if review_json else None,
+                    'changes': []
+                }
+
+            ai_metadata = {
+                'issue_key': issue_key,
+                'language': language,
+                'gate': gate_result,
+                'test_cases': ai2_generated_files_snapshot,  # AI-2 raw output before review/refine
+                'reviewer': review_json,
+                'review_average': round(avg, 4) if avg is not None else None,
+                'review_threshold': threshold,
+                'refiner_output': refined,
+                'refinement_metadata': refined_meta,
+            }
+            generated_files['metadata.json'] = json.dumps(ai_metadata, indent=2)
+            logging.info('[%s] Wrote AI metadata file metadata.json', issue_key)
+        except Exception as e:
+            logging.warning('[%s] Failed to build AI metadata: %s', issue_key, str(e))
         
-        # Step 4: Save Test Files Locally
+        # Step 4: Save Test Files Locally (with review report)
         if save_locally:
             logging.info('[%s] Step 4/5: Saving test files locally', issue_key)
             output_dir = save_tests_locally(issue_key, generated_files, language)
@@ -187,6 +327,8 @@ Next Steps:
     
     summary_path.write_text(summary_content, encoding='utf-8')
     logging.info('[%s]     ✓ GENERATION_INFO.txt', issue_key)
+
+    # metadata.json will be created later in orchestrator after LLM passes
     
     return str(output_dir)
 
@@ -231,6 +373,9 @@ def format_github_commit_summary(
     
     if output_dir:
         summary += f"\n📂 Local copy saved to: `{output_dir}`"
+    
+    # Add review note if present
+    summary += "\n\n🧪 Review Layer: Executability, Coverage, Criteria checked."
     
     return summary
 

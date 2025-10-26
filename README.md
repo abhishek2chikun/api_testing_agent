@@ -32,12 +32,13 @@ An intelligent orchestration service that automatically:
 └──────┬──────┘
        │ Webhook
        ▼
-┌─────────────────────┐
-│  FastAPI Webhook    │  ← POST /jira/webhook
-│  (core/webhooks.py) │
-└──────┬──────────────┘
-       │
-       ▼
+┌─────────────────────┐             ┌──────────────────────────┐
+│  FastAPI Webhook    │             │  Polling Runner          │
+│  (core/webhooks.py) │             │  (core/epic_runner.py)   │
+└──────────┬──────────┘             └──────────┬───────────────┘
+           │                                     │
+           └───────────────┬─────────────────────┘
+                           ▼
 ┌──────────────────────────────────────────────────────────┐
 │              ORCHESTRATION PIPELINE                       │
 │              (core/orchestrator.py)                       │
@@ -51,23 +52,35 @@ An intelligent orchestration service that automatically:
 │         ├─> Fetch & parse OpenAPI spec (JSON/YAML)       │
 │         └─> Extract manual endpoints or use description  │
 │                                                           │
-│  3. Generate Tests with LLM                              │
+│  3. Eligibility Gate (LLM)                               │
+│     └─> services/test_generator/gating.py                │
+│         ├─> Output: {"should_proceed": bool, "reason": ""}│
+│         └─> If false → skip and post comment             │
+│                                                           │
+│  4. Generate Tests with LLM                              │
 │     └─> services/test_generator/generator.py             │
 │         ├─> Format Epic + OpenAPI spec into prompt       │
-│         ├─> Call OpenAI GPT-4                           │
+│         ├─> Call OpenAI (configurable model)             │
 │         └─> Parse generated test files                   │
 │                                                           │
-│  4. Commit to GitHub                                     │
+│  5. Review & Refine (LLM)                                │
+│     └─> services/test_generator/reviewer.py              │
+│         ├─> Score: syntax, coverage, criteria            │
+│         ├─> Notes: detailed findings                     │
+│         └─> If below threshold → refine with notes       │
+│     └─> services/test_generator/refiner.py               │
+│                                                           │
+│  6. Commit to GitHub                                     │
 │     └─> integrations/github/client.py                    │
 │         └─> Create branch: auto/tests/{epic}/{timestamp} │
 │                                                           │
-│  5. Run Tests in Docker                                  │
+│  7. Run Tests in Docker                                  │
 │     └─> services/test_runner/runner.py                   │
 │         ├─> Clone branch to temp directory               │
 │         ├─> Run pytest in python:3.11 container          │
 │         └─> Parse JUnit XML results                      │
 │                                                           │
-│  6. Post Results to Jira                                 │
+│  8. Post Results to Jira                                 │
 │     └─> integrations/jira/client.py                      │
 │         └─> Add comment with test results                │
 └──────────────────────────────────────────────────────────┘
@@ -161,42 +174,47 @@ cp env.example .env
 nano .env
 ```
 
-Required environment variables:
+Required environment variables (secrets only):
 
 ```bash
-# Jira Configuration
+# Jira (secret)
 JIRA_BASE=https://yourcompany.atlassian.net
 JIRA_USER=your-email@example.com
 JIRA_TOKEN=your_jira_api_token
 
-# GitHub Configuration  
+# GitHub (secret)
 GITHUB_TOKEN=your_github_personal_access_token
-REPO_FULL_NAME=owner/repository
 
-# OpenAI Configuration
+# OpenAI (secret)
 OPENAI_API_KEY=sk-your-openai-api-key
 
-# Optional: For testing
-TEST_EPIC_KEY=EPIC-123
+# Optional Jenkins credentials (secrets)
+JENKINS_USER=admin
+JENKINS_TOKEN=your-jenkins-api-token
 ```
+
+Non-secrets like `REPO_FULL_NAME`, `JENKINS_URL`, polling intervals, and Jira prefix now live in `config/config.yaml` (see Advanced Configuration).
 
 ### 4. Run the Service
 
 ```bash
-# Option 1: Using main.py
-python main.py
+# Option 1: Using main.py (FastAPI on 8002 by default)
+python main.py --port 8002
+
+# Start with polling runner enabled (process only epics with configured prefix)
+python main.py --runner on --language python --jenkins no --port 8002
 
 # Option 2: Using uvicorn directly
-uvicorn core.webhooks:app --reload --port 8000
+uvicorn core.webhooks:app --reload --port 8002
 
-# The service will be available at http://localhost:8000
+# The service will be available at http://localhost:8002
 ```
 
 ### 5. Configure Jira Webhook
 
 1. Go to Jira → Settings → System → WebHooks
 2. Create new webhook:
-   - **URL**: `http://your-server:8000/jira/webhook`
+   - **URL**: `http://your-server:8002/jira/webhook`
    - **Events**: Issue → Updated
    - **JQL Filter** (optional): `project = YOUR_PROJECT AND issuetype = Epic`
 
@@ -315,6 +333,32 @@ tests/
 
 ## 🔧 Advanced Configuration
 
+### Configuration via YAML (non-secrets)
+
+Create or edit `config/config.yaml` to control runner and defaults:
+
+```yaml
+runner:
+  time_sleep: 60           # seconds between polling cycles
+  prefix_jira_name: "KAN"  # only process epics from this project
+  max_per_cycle: 5
+
+github:
+  repo_full_name: "owner/repo"  # token stays in env
+
+openai:
+  generation_model: "gpt-4o-mini"
+  gating_model: "gpt-4o-mini"
+  review_model: "gpt-4o-mini"
+  review_threshold: 0.7
+
+jenkins:
+  url: "http://localhost:8080"   # non-secret; credentials remain in env
+  job_name: "API-Testing-Agent"
+```
+
+Secrets remain in environment variables: `JIRA_USER`, `JIRA_TOKEN`, `GITHUB_TOKEN`, `OPENAI_API_KEY`, optional `JENKINS_USER`, `JENKINS_TOKEN`.
+
 ### Testing Locally Without Webhook
 
 ```python
@@ -349,6 +393,39 @@ generated_files = generate_tests(issue_key, epic, contract, language='java')
 # And use:
 runner_result = run_maven_tests_in_docker(branch)
 ```
+
+### Polling Runner (Jira prefix + interval)
+
+Start the service with a background runner that polls Jira for Epics from a given project prefix and triggers the pipeline:
+
+```bash
+# Run FastAPI + start runner
+python main.py --runner on --language python --jenkins no
+
+# Or just the runner via helper script
+python tests/test_orchestrator_flow.py --runner on --language python --jenkins no
+```
+
+Runner behavior:
+- Sleeps `runner.time_sleep` seconds between cycles
+- Processes only issues with keys starting with `runner.prefix_jira_name` (e.g., `KAN-`)
+- Skips duplicates within a short-lived cache
+- Uses the LLM eligibility gate before generation and posts reasons if skipped
+
+### CLI: Direct Orchestrator Run
+
+```bash
+python tests/test_orchestrator_flow.py \
+  --jira_name KAN-4 \
+  --language python \
+  --jenkins yes     # push to GitHub to trigger Jenkins
+```
+
+Parameters:
+- `--jira_name`: Epic key to process (required when `--runner=off`)
+- `--language`: `python` or `java`
+- `--jenkins`: `yes` to push to GitHub (triggers Jenkins), otherwise `no`
+- `--runner`: `on` to start polling runner, or `off` to process a single epic
 
 ---
 

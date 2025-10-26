@@ -7,11 +7,12 @@ import os
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
+from config.loader import get_config_value
 
 load_dotenv()
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
-REPO_FULL_NAME = os.getenv('REPO_FULL_NAME')
+REPO_FULL_NAME = os.getenv('REPO_FULL_NAME') or get_config_value('github.repo_full_name')
 
 def commit_files_to_branch(issue_key: str, files: dict) -> str:
     """

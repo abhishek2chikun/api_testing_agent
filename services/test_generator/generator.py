@@ -6,6 +6,7 @@ import os
 import re
 from dotenv import load_dotenv
 from openai import OpenAI
+from config.loader import get_config_value
 from services.test_generator.prompts import PYTEST_PROMPT_TEMPLATE, JAVA_PROMPT_TEMPLATE
 
 load_dotenv()
@@ -159,7 +160,7 @@ def format_openapi_spec(spec: dict, max_length: int = 8000) -> str:
     
     return formatted
 
-def call_llm(prompt: str, model: str = 'gpt-4o-mini') -> str:
+def call_llm(prompt: str, model: str = None) -> str:
     """
     Call OpenAI LLM for test generation using the new API (v1.0+).
     
@@ -170,6 +171,9 @@ def call_llm(prompt: str, model: str = 'gpt-4o-mini') -> str:
     Returns:
         str: LLM-generated response text
     """
+    # Choose model from config default if not provided
+    model_name = model or get_config_value('openai.generation_model', 'gpt-4o-mini')
+
     messages = [
         {
             "role": "system",
@@ -183,7 +187,7 @@ def call_llm(prompt: str, model: str = 'gpt-4o-mini') -> str:
     
     # Use new OpenAI API (v1.0+)
     response = client.chat.completions.create(
-        model=model,
+        model=model_name,
         messages=messages,
         temperature=0.0,
         max_tokens=4000  # Increased for longer test files

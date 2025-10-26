@@ -1,10 +1,12 @@
 """
 Jira API client for interacting with Jira REST API.
 Handles authentication and API calls for fetching issues and posting comments.
+Includes search/query helpers for polling runners.
 """
 import os
 import requests
 from dotenv import load_dotenv
+from typing import Dict, List, Optional
 
 load_dotenv()
 
@@ -77,5 +79,73 @@ def post_comment(issue_key: str, body: str) -> dict:
     )
     response.raise_for_status()
     return response.json()
+
+def search_issues(jql: str, max_results: int = 50, fields: Optional[List[str]] = None, start_at: int = 0) -> Dict:
+    """
+    Search Jira issues using JQL. Uses the new /rest/api/3/search/jql API with robust fallbacks.
+    Returns the raw search response with issues, total, etc.
+    """
+    base_url = (JIRA_BASE or "").rstrip('/')
+    common_headers = {"Accept": "application/json"}
+    field_str = ",".join(fields) if fields else None
+
+    # Attempt 1: New GET endpoint /search/jql (per Atlassian change notice)
+    try:
+        url_new = f"{base_url}/rest/api/3/search/jql"
+        params_new = {
+            "jql": jql,
+            "maxResults": max_results,
+            "startAt": start_at
+        }
+        if field_str:
+            params_new["fields"] = field_str
+        resp = requests.get(url_new, auth=(JIRA_USER, JIRA_TOKEN), headers=common_headers, params=params_new)
+        if resp.status_code == 200:
+            return resp.json()
+        # If 410/404, fall through to legacy
+    except requests.exceptions.RequestException:
+        pass
+
+    # Attempt 2: Legacy GET endpoint /search with jql param
+    try:
+        url_old_get = f"{base_url}/rest/api/3/search"
+        params_old = {
+            "jql": jql,
+            "maxResults": max_results,
+            "startAt": start_at
+        }
+        if field_str:
+            params_old["fields"] = field_str
+        resp = requests.get(url_old_get, auth=(JIRA_USER, JIRA_TOKEN), headers=common_headers, params=params_old)
+        if resp.status_code == 200:
+            return resp.json()
+    except requests.exceptions.RequestException:
+        pass
+
+    # Attempt 3: Legacy POST endpoint /search with JSON body
+    url_old_post = f"{base_url}/rest/api/3/search"
+    body = {
+        "jql": jql,
+        "maxResults": max_results,
+        "startAt": start_at
+    }
+    if fields:
+        body["fields"] = fields
+    resp = requests.post(url_old_post, auth=(JIRA_USER, JIRA_TOKEN), headers={**common_headers, "Content-Type": "application/json"}, json=body)
+    resp.raise_for_status()
+    return resp.json()
+
+def find_recent_epics_by_prefix(prefix_jira_name: str, limit: int = 10) -> List[Dict]:
+    """
+    Find recent Epics by project prefix (e.g., 'KAN').
+    Filters out Done/Closed categories.
+    """
+    project = prefix_jira_name
+    jql = (
+        f"project = {project} AND issuetype = Epic "
+        f"AND statusCategory != Done ORDER BY updated DESC"
+    )
+    data = search_issues(jql=jql, max_results=limit, fields=["summary", "description", "updated"])  
+    return data.get("issues", [])
 
 

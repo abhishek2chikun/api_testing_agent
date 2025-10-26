@@ -1,0 +1,35 @@
+# Non-secret configuration for API Testing Agent
+
+runner:
+  # Seconds to sleep between polling cycles
+  time_sleep: 30
+  # Jira project key/prefix to process (e.g., KAN, ENG)
+  prefix_jira_name: "KAN"
+  # Maximum epics to process per cycle
+  max_per_cycle: 5
+
+jenkins:
+  # Non-secret Jenkins settings
+  url: "http://localhost:8080"
+  job_name: "API-Testing-Agent"
+
+testing:
+  # Default Epic to run in direct mode (CLI), if not provided
+  test_epic_key: "KAN-4"
+
+maven:
+  # Local Maven command, if used outside Docker
+  cmd: "mvn"
+
+github:
+  # Non-secret defaults (token remains in env)
+  repo_full_name: "owner/repo"
+
+openai:
+  # Default model names (API key remains in env)
+  generation_model: "gpt-5-mini-2025-08-07"
+  gating_model: "gpt-5-mini-2025-08-07"
+  review_model: "gpt-5-mini-2025-08-07"
+  review_threshold: 0.9
+
+
