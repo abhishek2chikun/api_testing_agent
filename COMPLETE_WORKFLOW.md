@@ -1,37 +1,180 @@
 # Complete End-to-End Workflow 🔄
 
-## 📊 System Architecture
+## 📊 Mermaid Flow Diagrams
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        API Testing Agent                              │
-└─────────────────────────────────────────────────────────────────────┘
+### Complete System Flow (Jira to Jenkins)
 
-┌──────────┐      ┌──────────────┐             ┌──────────┐      ┌──────────┐
-│   Jira   │─────▶│  FastAPI     │────────────▶│  GitHub  │─────▶│ Jenkins  │
-│   Epic   │      │  Webhook     │             │  Repo    │      │Pipeline  │
-└──────────┘      └──────┬───────┘             └──────────┘      └──────────┘
-                         │
-                   (prefix filter)
-                         │
-                         ▼
-                  ┌──────────────┐
-                  │  Orchestrator│
-                  │  (LLM Gate)  │
-                  └──────┬───────┘
-                         │
-                         ▼
-                 Generate Tests (LLM)
-                         │
-                         ▼
-                 Review & Refine (LLM)
-                          │
-                          ▼
-                 auto/tests/{branch}
-                         │
-                         ▼
-                       Run Tests
+```mermaid
+graph TB
+    subgraph Input["🔹 Input Sources"]
+        Jira[Jira Epic<br/>OpenAPI URL + Requirements]
+        Webhook[FastAPI Webhook<br/>/jira/webhook]
+        Runner[Polling Runner<br/>time_sleep + prefix]
+    end
+
+    subgraph Config["⚙️ Configuration"]
+        YAML[config.yaml<br/>runner.prefix_jira_name<br/>openai.review_threshold<br/>models]
+        ENV[.env secrets<br/>JIRA_TOKEN<br/>GITHUB_TOKEN<br/>OPENAI_API_KEY]
+    end
+
+    subgraph Orchestrator["🎯 Orchestration Pipeline"]
+        Fetch[Fetch Epic<br/>fetch_issue]
+        Parse[Parse Contract<br/>extract_contract]
+        
+        subgraph AI["🤖 AI Processing Chain"]
+            AI1[AI-1: Eligibility Gate<br/>check_epic_eligibility<br/>should_proceed: bool]
+            AI2[AI-2: Test Generator<br/>generate_tests<br/>pytest/RestAssured]
+            AI3[AI-3: Review<br/>review_and_fix_tests<br/>score + notes]
+            AI4[AI-4: Refine<br/>refine_tests_with_notes<br/>corrected files]
+        end
+        
+        Decision{avg score<br/><= threshold?}
+        SaveMeta[Save metadata.json<br/>gate+testcases+reviewer+refiner]
+        SaveLocal[Save Locally<br/>output/EPIC_timestamp/]
+    end
+
+    subgraph Deployment["🚀 Deployment & CI/CD"]
+        GitHub[Push to GitHub<br/>auto/tests/EPIC/timestamp]
+        Jenkins[Jenkins Pipeline<br/>pytest/mvn test<br/>JUnit results]
+        Comment[Post to Jira<br/>test results + branch]
+    end
+
+    Jira -->|webhook event| Webhook
+    Jira -.->|JQL poll| Runner
+    Webhook -->|prefix filter| Fetch
+    Runner -->|prefix filter| Fetch
+    
+    YAML -.->|config| Runner
+    YAML -.->|thresholds| Decision
+    ENV -.->|secrets| AI
+
+    Fetch --> Parse
+    Parse --> AI1
+    
+    AI1 -->|false| Comment
+    AI1 -->|true| AI2
+    AI2 --> AI3
+    AI3 --> Decision
+    
+    Decision -->|yes| AI4
+    Decision -->|no| SaveMeta
+    AI4 --> SaveMeta
+    
+    SaveMeta --> SaveLocal
+    SaveLocal -->|optional| GitHub
+    GitHub --> Jenkins
+    Jenkins --> Comment
+
+    style AI1 fill:#e1f5ff
+    style AI2 fill:#fff9e1
+    style AI3 fill:#ffe1f5
+    style AI4 fill:#e1ffe1
+    style Decision fill:#ffd700
 ```
+
+### Detailed AI Processing Flow
+
+```mermaid
+sequenceDiagram
+    participant J as Jira Epic
+    participant O as Orchestrator
+    participant AI1 as AI-1: Gate
+    participant AI2 as AI-2: Generator
+    participant AI3 as AI-3: Reviewer
+    participant AI4 as AI-4: Refiner
+    participant GH as GitHub
+    participant JK as Jenkins
+
+    J->>O: Epic created/updated
+    O->>O: Fetch & parse contract
+    
+    Note over O,AI1: Eligibility Check
+    O->>AI1: epic + contract
+    AI1-->>O: {should_proceed: bool, reason}
+    
+    alt should_proceed = false
+        O->>J: Post gate failure reason
+        Note over O: STOP
+    else should_proceed = true
+        Note over O,AI2: Test Generation
+        O->>AI2: epic + contract + language
+        AI2-->>O: files {path: content}
+        
+        Note over O,AI3: Review & Scoring
+        O->>AI3: epic + contract + files
+        AI3-->>O: {score, syntax_ok, coverage_score, criteria_score, notes}
+        O->>O: Calculate avg = (coverage + criteria + syntax)/3
+        
+        alt avg <= threshold
+            Note over O,AI4: Refinement Pass
+            O->>AI4: epic + contract + files + notes
+            AI4-->>O: corrected files
+            O->>O: Apply corrections
+        end
+        
+        O->>O: Write metadata.json<br/>(gate, testcases, reviewer, refiner)
+        O->>O: Save locally: output/EPIC/
+        
+        opt GitHub enabled
+            O->>GH: Push to auto/tests/EPIC/timestamp
+            GH->>JK: Trigger pipeline
+            JK->>JK: Run tests (pytest/mvn)
+            JK->>J: Post results + branch
+        end
+    end
+```
+
+### Data Flow & Artifacts
+
+```mermaid
+graph LR
+    subgraph Inputs
+        E[Epic Description<br/>OpenAPI URL]
+        C[config.yaml]
+    end
+
+    subgraph AI_Chain["AI Processing Chain"]
+        direction TB
+        G[Gate Output<br/>JSON]
+        T[Test Files<br/>Dict]
+        R[Review Scores<br/>JSON]
+        F[Refined Files<br/>Dict]
+    end
+
+    subgraph Artifacts["📦 Output Artifacts"]
+        direction TB
+        M[metadata.json<br/>├─ gate<br/>├─ test_cases<br/>├─ reviewer<br/>├─ refiner_output<br/>└─ refinement_metadata]
+        GI[GENERATION_INFO.txt<br/>summary]
+        TF[Test Files<br/>*.py / *.java]
+    end
+
+    E --> G
+    G --> T
+    T --> R
+    R --> F
+    
+    G --> M
+    T --> M
+    R --> M
+    F --> M
+    
+    T --> TF
+    F --> TF
+    
+    C -.->|threshold| R
+    
+    M --> GH[GitHub Branch]
+    TF --> GH
+    GI --> GH
+
+    style M fill:#ffd700
+    style G fill:#e1f5ff
+    style T fill:#fff9e1
+    style R fill:#ffe1f5
+    style F fill:#e1ffe1
+```
+
+---
 
 ## 🧭 Architecture Flow (Detailed)
 
