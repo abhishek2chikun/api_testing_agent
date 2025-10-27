@@ -27,9 +27,10 @@ github:
 
 openai:
   # Default model names (API key remains in env)
-  generation_model: "gpt-5-mini-2025-08-07"
-  gating_model: "gpt-5-mini-2025-08-07"
-  review_model: "gpt-5-mini-2025-08-07"
+  generation_model: "gpt-4o-mini"
+  gating_model: "gpt-4o-mini"
+  review_model: "gpt-4o-mini"
+  refine_model: "gpt-4o-mini"
   review_threshold: 0.9
 
 

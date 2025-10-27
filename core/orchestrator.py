@@ -33,9 +33,11 @@ def process_epic(
     Steps:
     1. Fetch Epic details from Jira
     2. Extract & fetch API contract (OpenAPI spec robustly)
-    3. Generate tests using LLM (Python/pytest or Java/RestAssured)
-    4. Save generated test files locally
-    5. Push to GitHub repository (triggers Jenkins pipeline)
+    3. Eligibility Gate (LLM) - verify if Epic is ready for test generation
+    4. Generate tests using LLM (Python/pytest or Java/RestAssured)
+    5. Review and Refine tests using LLM (score, fix, refine if below threshold)
+    6. Save generated test files locally
+    7. Push to GitHub repository (triggers Jenkins pipeline)
     
     Args:
         issue_key: Jira issue key (e.g., 'EPIC-123')
@@ -62,13 +64,13 @@ def process_epic(
     
     try:
         # Step 1: Fetch Epic from Jira
-        logging.info('[%s] Step 1/5: Fetching Epic from Jira', issue_key)
+        logging.info('[%s] Step 1/7: Fetching Epic from Jira', issue_key)
         epic = fetch_issue(issue_key)
         epic_summary = epic.get('fields', {}).get('summary', 'N/A')
         logging.info('[%s] ✓ Epic fetched: %s', issue_key, epic_summary)
         
         # Step 2: Extract & Fetch OpenAPI Specification (Robustly)
-        logging.info('[%s] Step 2/5: Extracting and fetching OpenAPI specification', issue_key)
+        logging.info('[%s] Step 2/7: Extracting and fetching OpenAPI specification', issue_key)
         contract = extract_contract(epic, fetch_openapi=True)
         
         # Log what we found
@@ -87,10 +89,10 @@ def process_epic(
         else:
             logging.info('[%s] ✓ Using Epic description for test generation', issue_key)
         
-        # Eligibility Gate (LLM) before generation
+        # Step 3: Eligibility Gate (LLM) before generation
         try:
             gating_model = get_config_value('openai.gating_model', 'gpt-4o-mini')
-            logging.info('[%s] Eligibility gate using model: %s', issue_key, gating_model)
+            logging.info('[%s] Step 3/7: Eligibility Gate using model: %s', issue_key, gating_model)
             gate = check_epic_eligibility(issue_key, epic, contract, model=gating_model)
             gate_result = gate
             logging.info('[%s]   └─ Gate result: %s', issue_key, gate)
@@ -116,9 +118,9 @@ def process_epic(
         except Exception as e:
             logging.warning('[%s] Eligibility gate error (continuing): %s', issue_key, str(e))
 
-        # Step 3: Generate Tests using LLM (Python/pytest or Java/RestAssured)
+        # Step 4: Generate Tests using LLM (Python/pytest or Java/RestAssured)
         framework = 'pytest' if language.lower() == 'python' else 'RestAssured'
-        logging.info('[%s] Step 3/5: Generating %s tests with LLM', issue_key, framework)
+        logging.info('[%s] Step 4/7: Generating %s tests with LLM', issue_key, framework)
         logging.info('[%s]   └─ Preparing prompt with OpenAPI spec + Epic details...', issue_key)
         
         generated_files = generate_tests(issue_key, epic, contract, language=language)
@@ -127,8 +129,9 @@ def process_epic(
         logging.info('[%s] ✓ Generated %d test files:', issue_key, len(generated_files))
         for file_path in generated_files.keys():
             logging.info('[%s]   └─ %s', issue_key, file_path)
-
-        # Review & Fix Layer (LLM)
+        
+        # Step 5: Review & Fix Layer (LLM)
+        logging.info('[%s] Step 5/7: Review and Refine tests with LLM', issue_key)
         try:
             review_json, corrected = review_and_fix_tests(issue_key, epic, contract, generated_files)
             score = float(review_json.get('score', 0.0))
@@ -225,16 +228,16 @@ def process_epic(
         except Exception as e:
             logging.warning('[%s] Failed to build AI metadata: %s', issue_key, str(e))
         
-        # Step 4: Save Test Files Locally (with review report)
+        # Step 6: Save Test Files Locally (with review report)
         if save_locally:
-            logging.info('[%s] Step 4/5: Saving test files locally', issue_key)
+            logging.info('[%s] Step 6/7: Saving test files locally', issue_key)
             output_dir = save_tests_locally(issue_key, generated_files, language)
             results['output_dir'] = output_dir
             logging.info('[%s] ✓ Tests saved to: %s', issue_key, output_dir)
         
-        # Step 5: Push to GitHub (Triggers Jenkins Pipeline)
+        # Step 7: Push to GitHub (Triggers Jenkins Pipeline)
         if save_to_github:
-            logging.info('[%s] Step 5/5: Pushing tests to GitHub repository', issue_key)
+            logging.info('[%s] Step 7/7: Pushing tests to GitHub repository', issue_key)
             logging.info('[%s]   └─ This will trigger Jenkins pipeline for test execution', issue_key)
             
             branch = commit_files_to_branch(issue_key, generated_files)
